@@ -1,0 +1,94 @@
+Посмотрим как работать с форматами JSON и XML:
+
+В PG есть два типа данных JSON:
+JSONB — двоичная разновидность формата JSON, у которой пробелы удаляются, сортировка объектов не сохраняется, 
+вместо этого они хранятся наиболее оптимальным образом, и сохраняется только последнее значение для ключей-дубликатов. 
+JSONB обычно является предпочтительным форматом, поскольку требует меньше места для объектов, может быть проиндексирован 
+и обрабатывается быстрее, так как не требует повторного синтаксического анализа.
+
+CREATE TABLE public.skills (
+  id BIGSERIAL,
+  user_id BIGINT NOT NULL,
+  ability JSONB,
+  xml XML,
+  CONSTRAINT skills_pkey PRIMARY KEY(id),
+  CONSTRAINT skills_user_id_key UNIQUE(user_id),
+  CONSTRAINT skills_fk_user_id FOREIGN KEY (user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+vkdb=# INSERT INTO public.skills (user_id, ability) VALUES
+vkdb-#   (1, '{"User1": ["programmer", "engeneer"]}'),
+vkdb-#   (6, '{"User5": ["manager"]}'),
+vkdb-#   (10, '{"User13": ["driver", "security"]}');
+INSERT 0 3
+
+vkdb=# SELECT * FROM skills;
+ id | user_id |                ability
+----+---------+---------------------------------------
+  1 |       1 | {"User1": ["programmer", "engeneer"]}
+  2 |       6 | {"User5": ["manager"]}
+  3 |      10 | {"User13": ["driver", "security"]}
+
+-- выборка с условием ключ:значение
+vkdb=# SELECT * FROM skills WHERE ability = '{"User1": ["programmer", "engeneer"]}';
+ id | user_id |                ability
+----+---------+---------------------------------------
+  1 |       1 | {"User1": ["programmer", "engeneer"]}
+
+-- выборка с частичным условием ключ:значение
+vkdb=# SELECT * FROM skills WHERE ability @> '{"User1": ["programmer"]}';
+ id | user_id |                ability
+----+---------+---------------------------------------
+  1 |       1 | {"User1": ["programmer", "engeneer"]}
+
+vkdb=# SELECT * FROM skills WHERE ability @> '{"User1": ["engeneer"]}';
+ id | user_id |                ability
+----+---------+---------------------------------------
+  1 |       1 | {"User1": ["programmer", "engeneer"]}
+
+-- выборка с указанием списка ключей
+vkdb=# SELECT * FROM skills WHERE ability ?| array['User1', 'User5'];
+ id | user_id |                ability
+----+---------+---------------------------------------
+  1 |       1 | {"User1": ["programmer", "engeneer"]}
+  2 |       6 | {"User5": ["manager"]}
+
+
+-- добавим поле в формате XML
+
+vkdb=# UPDATE skills SET xml = '<?xml version="1.1"?><company Name="Org1"/>' WHERE user_id = 1;
+
+vkdb=# select * from skills where id = 1;
+ id | user_id |                ability                |                     xml
+----+---------+---------------------------------------+---------------------------------------------
+  1 |       1 | {"User1": ["programmer", "engeneer"]} | <?xml version="1.1"?><company Name="Org1"/>
+
+vkdb=# select xml from skills where id = 1;
+                     xml
+---------------------------------------------
+ <?xml version="1.1"?><company Name="Org1"/>
+
+vkdb=# UPDATE skills SET xml = xmlcomment('hello') WHERE id = 2;
+vkdb=# UPDATE skills SET xml = xmlconcat('<abc/>', '<bar>foo</bar>') WHERE id = 3;
+vkdb=# UPDATE skills SET xml = xmlelement(name foo, xmlattributes(current_date as bar), 'cont', 'ent') WHERE id = 4;
+
+vkdb=# select xml from skills;
+                 xml
+-------------------------------------
+ <!--hello-->
+ <?xml version="1.1"?><company Name="Org1"/>
+ <abc/><bar>foo</bar>
+ <foo bar="2020-09-08">content</foo>
+
+
+vkdb=# select xml IS DOCUMENT from skills where id = 1;
+ ?column?
+----------
+ t
+(1 row)
+
+и т.д. - тема обработки xml конечно интересная, но очень уж нудная... :)

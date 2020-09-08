@@ -1,0 +1,447 @@
+############################################################################################################################################
+
+--	Практическое задание по теме “Введение в проектирование БД”
+
+############################################################################################################################################
+
+1.	Проанализировать структуру БД vk, которую мы создали на занятии, и внести предложения по усовершенствованию (если такие идеи есть). 
+	Напишите пожалуйста, всё-ли понятно по структуре.
+
+2.	Добавить необходимую таблицу/таблицы для того, чтобы можно было использовать лайки для медиафайлов, постов и пользователей.
+
+3.	Используя сервис http://filldb.info или другой по вашему желанию, сгенерировать тестовые данные для всех таблиц, учитывая логику связей. 
+	Для всех таблиц, где это имеет смысл, создать не менее 100 строк. 
+	Создать локально БД vk и загрузить в неё тестовые данные.
+	
+############################################################################################################################################
+
+-- Начнём с того что создадим нашу БД со всеми таблицами и связями:
+
+# sudo su - postgres
+$ psql
+psql (12.4 (Ubuntu 12.4-0ubuntu0.20.04.1))
+Type "help" for help.
+
+postgres=# CREATE DATABASE vkdb WITH ENCODING='UTF-8';
+CREATE DATABASE
+postgres=# \l
+                                  List of databases
+   Name    |  Owner   | Encoding |   Collate   |    Ctype    |   Access privileges
+-----------+----------+----------+-------------+-------------+-----------------------
+ example   | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 |
+ postgres  | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 |
+ sample    | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 |
+ template0 | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 | =c/postgres          +
+           |          |          |             |             | postgres=CTc/postgres
+ template1 | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 | =c/postgres          +
+           |          |          |             |             | postgres=CTc/postgres
+ usersdb   | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 |
+ vkdb      | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 |
+
+-- удалим базы с прошлого урока
+
+postgres=# DROP DATABASE usersdb;
+postgres=# DROP DATABASE sample;
+postgres=# DROP DATABASE example;
+DROP DATABASE
+postgres=# \l
+                                  List of databases
+   Name    |  Owner   | Encoding |   Collate   |    Ctype    |   Access privileges
+-----------+----------+----------+-------------+-------------+-----------------------
+ postgres  | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 |
+ template0 | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 | =c/postgres          +
+           |          |          |             |             | postgres=CTc/postgres
+ template1 | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 | =c/postgres          +
+           |          |          |             |             | postgres=CTc/postgres
+ vkdb      | postgres | UTF8     | ru_RU.UTF-8 | ru_RU.UTF-8 |
+(4 rows)
+
+-- для дальнейшей работой с нашей базой сделаем пользователя-администратора со всеми правами на базу
+
+postgres=# CREATE USER vkadmin WITH PASSWORD 'vkadminpwd';
+CREATE ROLE
+postgres=# select * from pg_user;
+ usename  | usesysid | usecreatedb | usesuper | userepl | usebypassrls |  passwd  | valuntil | useconfig
+----------+----------+-------------+----------+---------+--------------+----------+----------+-----------
+ postgres |       10 | t           | t        | t       | t            | ******** |          |
+ example  |    16385 | t           | t        | f       | f            | ******** |          |
+ dbuser   |    16413 | f           | f        | f       | f            | ******** |          |
+ vkadmin  |    16415 | f           | f        | f       | f            | ******** |          |
+(4 rows)
+
+postgres=# \c vkdb
+You are now connected to database "vkdb" as user "postgres".
+vkdb=# GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "vkadmin";
+GRANT
+
+vkdb=# DROP USER example;
+DROP ROLE
+vkdb=# DROP USER dbuser;
+DROP ROLE
+vkdb=# select * from pg_user;
+ usename  | usesysid | usecreatedb | usesuper | userepl | usebypassrls |  passwd  | valuntil | useconfig
+----------+----------+-------------+----------+---------+--------------+----------+----------+-----------
+ postgres |       10 | t           | t        | t       | t            | ******** |          |
+ vkadmin  |    16415 | f           | f        | f       | f            | ******** |          |
+(2 rows)
+
+vkdb=# \q
+
+-- Проверка
+# psql -Uvkadmin vkdb -h127.0.0.1
+Password for user vkadmin:
+psql (12.4 (Ubuntu 12.4-0ubuntu0.20.04.1))
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, bits: 256, compression: off)
+Type "help" for help.
+
+vkdb=> \q
+
+-- далее настраиваем удалённое подключение к базам нашего сервера - у нас сервер НЕ локальный, а по умолчанию доступ разрешён только для localhost:
+
+-- слушаем все IP
+#/etc/postgresql/12/main$ vi  postgresql.conf
+listen_addresses = '*'          # what IP address(es) to listen on;
+
+-- добавляем в конец файла разрешение для всех пользователей из локальных подсетей, авторизация по обычному паролю
+# /etc/postgresql/12/main$ nano pg_hba.conf
+host    all             all             192.168.0.0/16          password
+
+-- перегружаем сервер БД
+systemctl restart postgresql
+
+-- настраиваем файрвол
+sudo ufw allow postgresql/tcp
+
+-- для дальнейшей работы будем использовать графическую оболочку под виндовс SQL Manager for PostgreSQL - мне кажется удобнее чем DBeaver
+
+-- создаём таблицу users
+
+CREATE TABLE public.users (
+  id SERIAL,
+  email VARCHAR(150) NOT NULL,
+  name VARCHAR(50) COLLATE pg_catalog."ru-RU-x-icu" NOT NULL,
+  pass VARCHAR(100) NOT NULL,
+  surname VARCHAR(50),
+  phone VARCHAR(20),
+  gender VARCHAR(1),
+  birthday DATE DEFAULT '1000-01-01'::date NOT NULL,
+  photo_id BIGINT,
+  created_at TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT users_email_key UNIQUE(email),
+  CONSTRAINT users_pkey PRIMARY KEY(id)
+) ;
+CREATE UNIQUE INDEX users_name ON public.users
+  USING btree (name COLLATE pg_catalog."ru-RU-x-icu", surname COLLATE pg_catalog."default");
+CREATE INDEX users_phone ON public.users
+  USING btree (phone COLLATE pg_catalog."default");
+ALTER TABLE public.users
+  OWNER TO vkadmin;  
+  
+-- пробуем вставить данные:
+
+INSERT INTO users (email, name, pass, surname, phone, gender, birthday) 
+VALUES ('email@mail.ru', 'user', 'password', 'surname', '+71234567890','M', '2020-01-01');
+
+-- смотрим: всё получилось!
+
+vkdb=> SELECT * FROM users;
+ id |     email     | name |   pass   | surname |    phone     | gender |  birthday  | photo_id |         created_at
+----+---------------+------+----------+---------+--------------+--------+------------+----------+----------------------------
+  1 | email@mail.ru | user | password | surname | +71234567890 | M      | 2020-01-01 |          | 2020-08-27 15:28:30.619+03
+
+-- В нашей структуре данных при создании пользователя логично сразу создавать запись в таблице настроек для соответствующего пользователя, а затем всё это только модифицировать.
+-- Для этого нужны скрипты, которые следят за корректностью данных и сами вносят правильные связанные ключи в таблицы. 
+
+-- Создадим таблицу settings: непонятно зачем тут user_id нужно SERIAL - это поле привязано к FOREIGN KEY (user_id) REFERENCES public.users(id), соответственно его мы назначаем "вручную"
+-- при привязке настроек к пользователю... но в принципе оно не мешает.
+
+-- тип данных ENUM в PG как в MySQL выбрать не получается, поэтому для каждого поля будем делать свой тип индивидуально - 
+-- в принципе это более правильно т.к. при изменении параметров меняется не везде сразу а только там где нужно
+
+CREATE TYPE can_see_enum AS ENUM ('all', 'friends_of_friends', 'friends');
+CREATE TYPE can_comment_enum AS ENUM ('all', 'friends_of_friends', 'friends', 'nobody');
+CREATE TYPE can_message_enum AS ENUM ('all', 'friends_of_friends', 'friends');
+
+CREATE TABLE public.settings (
+  user_id SERIAL,
+  can_see public.can_see_enum DEFAULT 'all'::can_see_enum,
+  can_comment public.can_comment_enum DEFAULT 'friends'::can_comment_enum,
+  can_message public.can_message_enum DEFAULT 'friends_of_friends'::can_message_enum,
+  CONSTRAINT settings_pkey PRIMARY KEY(user_id),
+  CONSTRAINT settings_id FOREIGN KEY (user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+ALTER TABLE public.settings
+  OWNER TO vkadmin;
+
+-- проверяем: если данные при вставки соответствуют то всё ок, если нет - не даёт вставить
+
+vkdb=> INSERT INTO settings (user_id, can_see, can_comment, can_message) VALUES (1, 'all', 'friends_of_friends', 'friends');
+INSERT 0 1
+
+vkdb=> INSERT INTO settings (user_id, can_see, can_comment, can_message) VALUES (10, '4', 'all', 'friends');
+ERROR:  invalid input value for enum can_see_enum: "4"
+LINE 1: ...d, can_see, can_comment, can_message) VALUES (10, '4', 'all'...
+
+vkdb=> INSERT INTO settings (user_id, can_see, can_comment, can_message) VALUES (11, 'all', 'all', 'friends');
+ERROR:  insert or update on table "settings" violates foreign key constraint "settings_id"
+DETAIL:  Key (user_id)=(11) is not present in table "users".
+
+vkdb=> select * from settings;
+ user_id | can_see |    can_comment     | can_message
+---------+---------+--------------------+-------------
+       1 | all     | friends_of_friends | friends
+
+-- далее будем генерировать тестовые данные...
+-- с популярными программами-генераторами сходу не получилось: то их алгоритмы безопасности не подходят под новую Ubuntu 20, то надо в виндовсе ставить и настраивать ODBC-коннекторы, то ещё что-то...
+-- поэтому более полезным будет решить этот вопрос самостоятельно и не зависеть в будущем от ограничений всех этих программ и сайтов!
+-- напишем небольшую программку на Питоне (код тут не прилагаю, но она не большая), и сгенерируем столько записей сколько нам нужно:
+
+vkdb=> SELECT COUNT(*) FROM users;
+ count
+-------
+   302
+
+vkdb=> SELECT * FROM users LIMIT 10;
+ id |     email      |  name  |       pass       |  surname  |    phone     | gender |  birthday  |      photo_id      |         created_at
+----+----------------+--------+------------------+-----------+--------------+--------+------------+--------------------+----------------------------
+  1 | User1@mail.ru  | User1  | wMmtNqW3fB       | Surname1  | +79859485522 | M      | 1998-05-22 | 603147833602212698 | 2020-08-31 12:34:28.509+03
+  2 | User2@mail.ru  | User2  | 5eqIJOcZYp8J     | Surname2  | +79524137108 | M      | 1951-02-07 | 910476803585591303 | 2020-08-31 12:34:28.526+03
+  3 | User3@mail.ru  | User3  | AKtu88Fbm2SULnBs | Surname3  | +79069784139 | F      | 1929-05-15 | 140057362797131434 | 2020-08-31 12:34:28.544+03
+  4 | User4@mail.ru  | User4  | yImG5TMBuq4xVm   | Surname4  | +79894354211 | F      | 1979-04-11 | 208320057688155855 | 2020-08-31 12:34:28.565+03
+  5 | User5@mail.ru  | User5  | 9xqOiCW3wD       | Surname5  | +79948525851 | F      | 1959-09-26 | 644924588955337576 | 2020-08-31 12:34:28.578+03
+  6 | User6@mail.ru  | User6  | FIC7jg0S         | Surname6  | +79162304959 | F      | 1970-10-07 | 626045505931600677 | 2020-08-31 12:34:28.591+03
+  7 | User7@mail.ru  | User7  | LRfRiZ65XRLMuGWu | Surname7  | +79899412493 | F      | 1951-07-30 | 747143179486923390 | 2020-08-31 12:34:28.609+03
+  8 | User8@mail.ru  | User8  | CgM46YBhmZ2Y3yVv | Surname8  | +79226549323 | M      | 2001-03-12 | 367270274077959026 | 2020-08-31 12:34:28.622+03
+  9 | User9@mail.ru  | User9  | BQE8G5Gb0        | Surname9  | +79530002405 | F      | 1901-10-14 | 661037904616659555 | 2020-08-31 12:34:28.635+03
+ 10 | User10@mail.ru | User10 | 1Czc6eMTMdhFT    | Surname10 | +79513018191 | M      | 1921-09-11 | 158213436466606183 | 2020-08-31 12:34:28.647+03
+
+vkdb=> SELECT COUNT(*) FROM settings;
+ count
+-------
+   302
+(1 row)
+
+vkdb=> SELECT * FROM settings LIMIT 10;
+ user_id |      can_see       |    can_comment     |    can_message
+---------+--------------------+--------------------+--------------------
+       1 | all                | all                | friends_of_friends
+       2 | friends            | all                | friends
+       3 | friends_of_friends | nobody             | all
+       4 | friends            | friends_of_friends | all
+       5 | friends_of_friends | all                | friends
+       6 | friends_of_friends | nobody             | friends
+       7 | friends            | friends_of_friends | all
+       8 | friends_of_friends | nobody             | friends
+       9 | friends_of_friends | friends            | friends
+      10 | all                | nobody             | friends_of_friends
+
+-- всё нормально!
+-- при желании можно было бы разнообразить имена и почту с применением словарей...
+
+-- создадим остальные таблицы:
+-- Таблица  messages
+
+CREATE TABLE public.messages (
+  id SERIAL,
+  from_user_id BIGINT NOT NULL,
+  to_user_id BIGINT NOT NULL,
+  body TEXT,
+  is_read BOOLEAN DEFAULT false,
+  created_at TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT messages_pkey PRIMARY KEY(id),
+  CONSTRAINT mess_from_uid FOREIGN KEY (from_user_id)
+    REFERENCES public.users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+    NOT DEFERRABLE,
+  CONSTRAINT mess_to_uid FOREIGN KEY (to_user_id)
+    REFERENCES public.users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+    NOT DEFERRABLE
+) ;
+
+ALTER TABLE public.messages
+  OWNER TO vkadmin;
+
+-- Таблица friend_requests
+
+CREATE TYPE status_enum AS ENUM ('requested', 'approved', 'unfriended', 'declined');
+
+CREATE TABLE public.friend_requests (
+  initiator_user_id BIGINT NOT NULL,
+  target_user_id BIGINT NOT NULL,
+  status public.status_enum DEFAULT 'requested'::status_enum,
+  requested_at TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  confirmed_at TIMESTAMP(3) WITH TIME ZONE,
+  CONSTRAINT friend_requests_pkey PRIMARY KEY(initiator_user_id, target_user_id),
+  CONSTRAINT friend_requests_init_id FOREIGN KEY (initiator_user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE,
+  CONSTRAINT friend_requests_targ_id FOREIGN KEY (target_user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+CREATE INDEX friend_requests_idx ON public.friend_requests
+  USING btree (initiator_user_id);
+
+CREATE INDEX friend_requests_idx1 ON public.friend_requests
+  USING btree (target_user_id);
+
+ALTER TABLE public.friend_requests
+  OWNER TO vkadmin;
+
+-- Таблица communities 
+
+CREATE TABLE public.communities (
+  id SERIAL,
+  name VARCHAR(255),
+  CONSTRAINT communities_pkey PRIMARY KEY(id)
+) ;
+
+ALTER TABLE public.communities
+  ALTER COLUMN id SET STATISTICS 0;
+
+ALTER TABLE public.communities
+  ALTER COLUMN name SET STATISTICS 0;
+
+CREATE INDEX communities_idx ON public.communities
+  USING btree (name COLLATE pg_catalog."default");
+
+ALTER TABLE public.communities
+  OWNER TO vkadmin;
+
+-- Таблица users_communities 
+
+CREATE TABLE public.users_communities (
+  user_id BIGINT NOT NULL,
+  community_id BIGINT NOT NULL,
+  is_admin BOOLEAN DEFAULT false,
+  CONSTRAINT users_communities_pk PRIMARY KEY(user_id, community_id),
+  CONSTRAINT users_communities_comm FOREIGN KEY (community_id)
+    REFERENCES public.communities(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE,
+  CONSTRAINT users_communities_users FOREIGN KEY (user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+ALTER TABLE public.users_communities
+  OWNER TO vkadmin;
+
+-- Таблица  posts
+
+CREATE TABLE public.posts (
+  id SERIAL,
+  user_id BIGINT NOT NULL,
+  body TEXT,
+  created_at TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP(3) WITH TIME ZONE,
+  CONSTRAINT posts_pkey PRIMARY KEY(id),
+  CONSTRAINT posts_fk_user_id FOREIGN KEY (user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+CREATE INDEX posts_user_id ON public.posts
+  USING btree (user_id);
+
+ALTER TABLE public.posts
+  OWNER TO vkadmin;
+
+-- Таблица comments
+
+CREATE TABLE public.comments (
+  id SERIAL,
+  user_id BIGINT NOT NULL,
+  post_id BIGINT NOT NULL,
+  body TEXT,
+  created_at TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT comments_pkey PRIMARY KEY(id),
+  CONSTRAINT comments_fk_posts FOREIGN KEY (post_id)
+    REFERENCES public.posts(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE,
+  CONSTRAINT comments_fk_users FOREIGN KEY (post_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+ALTER TABLE public.comments
+  OWNER TO vkadmin;
+
+-- Таблица photos
+
+CREATE TABLE public.photos (
+  id SERIAL,
+  user_id BIGINT NOT NULL,
+  description VARCHAR(255),
+  created_at TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT photos_pkey PRIMARY KEY(id),
+  CONSTRAINT photos_fk_user_id FOREIGN KEY (user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+CREATE INDEX photos_user_id ON public.photos
+  USING btree (user_id);
+
+ALTER TABLE public.photos
+  OWNER TO vkadmin;
+
+-- данные во все эти таблицы добавить можно с той же логикой что и для таблицы настроек, т.е. учитывая FOREIGN KEY вышестоящей таблицы
+-- пока делать не буду - надо сначала понять как этот проект будет развиваться далее.
+
+-- после такого объёма работ неплохо бы сделать бэкап...
+
+vkdb=> \q
+$ pwd
+/var/lib/postgresql
+$ pg_dump vkdb > vkdb-2020-08-31.dump
+$ ls -l
+-rw-rw-r-- 1 postgres postgres 44092 авг 28 18:10 vkdb.dump
+
+  
+-- 
+
+-- 2.	Добавить необходимую таблицу/таблицы для того, чтобы можно было использовать лайки для медиафайлов, постов и пользователей.
+--
+-- По поводу структуры БД : главное правило - данные не должны дублироваться, т.е. если возникает какая-то ситуация 
+-- то нужно создавать отдельную таблицу и связывать её с вышестоящей таблицей по ключу (FOREIGN KEY), как у нас везде и сделано - все таблицы ссылаютя на определённую запись 
+-- "главной" таблице пользователей через ключ id. 
+-- 
+-- Т.о. для лайков нужно создать отдельные таблицы и привязать их через ключ к полям родительских таблиц: например в таблице photos уже есть поле id, к нему и нужно привязать 
+-- FOREIGN KEY в создаваемой таблице лайков фото.  Можно ещё привязать и к табл. пользователей, но это необязательно т.к. оно и так будет связано через табл. photos
+
+CREATE TABLE public.likes_photos (
+  id SERIAL,
+  photo_id BIGINT NOT NULL,
+  description VARCHAR(255),
+  created_at TIMESTAMP(3) WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT likes_photos_pkey PRIMARY KEY(id),
+  CONSTRAINT likes_photos_fk_photo_id FOREIGN KEY (photo_id)
+    REFERENCES public.photos(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
