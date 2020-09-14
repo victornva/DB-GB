@@ -1,0 +1,296 @@
+В связи с тем что в конце сентября я уезжаю в отпуск и не смогу много авремени заниматься,
+я хотел бы пораньше начать заниматься курсовой работой чтобы больше успеть до отпуска.
+--
+Темой курсовой работы я выбираю систему биллинга для корпоративной сети телефонной связи.
+--
+Основные положения и терминология.
+--
+Биллингом (или тарификацией) называют процесс рассчёта стоимости телефонных вызовов и привязки их к абонентам с целью выставления счетов на оплату.
+Сеть корпоративной телефонии представляет собой логически объединенную с помощью каналов связи, протоколов и общего нумерационного плана группу 
+телефонныз станций (АТС), телефонных серверов, шлюзов и абонентских устройств.
+Нумерационный план - общие для всех устройств тел.сети правила набора номеров.
+Оператор телефонии - "провайдер", предоставляющий каналы входящей и исходящей телефонной связи в телефонную сеть общего пользования (ТфОП).
+Операторы предоставляют своим клиентам федеральные номера (+7....) и обеспечивают звонки за пределами корпоративной телефонной сети.
+Собственно процесс биллинга и направлен на отслеживание и рассчёт взаимодействия с операторами.
+Каждый узел тел.сети, взаимодействующий с провайдером напрямую через каналы связи (транки), подлежит тарификации. 
+Для этого узел гененрирует информацию о вызовах называемую CDR (Call Detail Record).
+В CDR записывается вся необходимая и достаточная информация о вызовах прошедших через данную АТС\сервер, а именно номера входящего и исходящего абонентов,
+дата и время вызова, длительность, входящие и исходящие каналы, какие-то дополнительные детали вызова - например протокол связи, причины отбоя и т.д.
+С цифровых АТС CDR как правило получаем виде текстового файла, а телефонные серверы обычно могут сразу сами записывать CDR сразу в СУБД.
+--
+Архитектура системы
+--
+В моей работе мы будем брать CDR от телефонных серверов Asterisk.
+Asterisk - это самое популярное решение для IP-телефонии, он умеет записывать CDR сразу в базу PostgreSQL (как впрочем и в другие СУБД).
+Но в нашей сети исторически сложилось так что все CDR "сливаются" в базы MySQL, поэтому придётся взаимодействовать сразу с двумя СУБД.
+Реализовать весь процесс биллинга непосредственно в базе данных в принципе наверное возможно, но это было бы неудобно т.к. любые изменения алгоритма будут требовать коррекции БД.
+Также неплохо бы сразу заложить в систему возможность распараллеливать обработку по разным физическим серверам, т.е. саму БД и модули биллинга лучше разделить.
+Поэтому мы будем реализовывать модульную архитектуру: БД в СУБД PostgreSQL и MySQL, а модули тарификации напишем на Python.
+Процесс тарификации мы разделим на несколько логических этапов, каждый из которых будет представлять из себя отдельную и независимую программу на Python, взаимодействующую с БД биллинга и больше ни с чем.
+Обрабатывать какждый модуль может за раз только одну строку БД биллинга.
+Т.о. мы можем разные экземпляры одиного модуля запускать на разных серверах - этим мы достигнем распределение нагрузки и отказоустойчивость системы.
+Такое узкое место в смысле отказоустойчивости как сама БД биллинга можно обойти зазеркалив сам сервер СУБД PostgreSQL. 
+--
+Итак, приступим!
+
+Сначала мы посмотрим какие данные мы будем получать на входе - вот структура таблицы CDR в БД MySQL:
+
+CREATE TABLE `cdr` (
+  `ID` INTEGER(11) NOT NULL AUTO_INCREMENT,
+  `marked` TINYINT(4) NOT NULL DEFAULT '0',
+  `calldate` DATETIME NOT NULL DEFAULT '0000-00-00 00:00:00',
+  `src` VARCHAR(80) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  `dst` VARCHAR(80) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  `dcontext` VARCHAR(80) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  `channel` VARCHAR(80) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  `dstchannel` VARCHAR(80) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  `duration` INTEGER(11) NOT NULL DEFAULT '0',
+  `billsec` INTEGER(11) NOT NULL DEFAULT '0',
+  `lastapp` VARCHAR(80) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  `lastdata` VARCHAR(80) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  `disposition` VARCHAR(45) COLLATE utf8_general_ci NOT NULL DEFAULT '',
+  PRIMARY KEY (`ID`),
+  UNIQUE KEY `ID` (`ID`),
+  KEY `calldate` (`calldate`),
+  KEY `dst` (`dst`),
+
+)ENGINE=MyISAM
+AUTO_INCREMENT=196920 CHARACTER SET 'utf8' COLLATE 'utf8_unicode_ci';
+
+-- описание полей:
+marked     - метка считано\не считано
+calldate   - дата и время поступления вызова;
+src        - входящий номер (абонент А);
+dst        - исходящий канал (абонент Б);
+channel    - входящий канал;
+dstchannel - исходящий канал;
+dcontext   - "контекст" вызова в asterisk;
+duration   - длительность вызова в секундах;
+billsec    - длительность вызова после ответа аб.Б в секундах;
+lastapp    - имя ф-ции обработавшей вызов;
+lastdata   - параметры ф-ции обработавшей вызов;
+disposition - статус вызова; 
+
+-- Начнём проектировать нашу БД для биллинга.
+-- Основа нашей БД биллинга - данные из БД CDR (не все данные нам понадобятся)
+-- В процессе разработки в БД наверняка будут вносится изменения - в конце мы выведем окончательную структуру БД.
+
+# sudo su - postgres
+$ psql
+postgres=# CREATE DATABASE billdb WITH ENCODING='UTF-8';
+CREATE DATABASE
+postgres=# CREATE USER billadmin WITH PASSWORD 'billadminpwd';
+CREATE ROLE
+postgres=# \c billdb
+You are now connected to database "billdb" as user "postgres".
+billdb=# GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO "billadmin";
+GRANT
+
+# psql -Ubilladmin billdb -hlocalhost
+Password for user billadmin:
+psql (12.4 (Ubuntu 12.4-0ubuntu0.20.04.1))
+
+billdb=>
+
+-------------------------------------------------------------------------------------------------------------
+-- таблица вызовов - главная таблица базы
+-- сюда попадают "сырые" данные CDR которые генерируют АТС, 
+-- после чего они последовательно обрабатываются, а результаты обработки заносятся с соответствующие поля
+
+CREATE TABLE public.paidcalls (
+  id BIGSERIAL,
+  calldate TIMESTAMP WITH TIME ZONE DEFAULT '1111-01-01 00:00:00+02:30:17'::timestamp with time zone NOT NULL,
+  channel VARCHAR DEFAULT ''::character varying NOT NULL,
+  dstchannel VARCHAR DEFAULT ''::character varying NOT NULL,
+  src VARCHAR(20) DEFAULT ''::character varying NOT NULL,
+  dst VARCHAR(20) DEFAULT ''::character varying NOT NULL,
+  dcontext VARCHAR(20) NOT NULL,
+  client_id INTEGER,
+  client VARCHAR(80) DEFAULT ''::character varying,
+  prefix_id INTEGER,
+  code_id INTEGER,
+  number VARCHAR(20) DEFAULT ''::character varying,
+  duration BIGINT DEFAULT 0 NOT NULL,
+  billsec BIGINT DEFAULT 0 NOT NULL,
+  billmin BIGINT DEFAULT 1 NOT NULL,
+  price REAL DEFAULT 0 NOT NULL,
+  total REAL DEFAULT 0 NOT NULL,
+  provider_id INTEGER,
+  status public.enum_paidcalls_status DEFAULT 'new record'::enum_paidcalls_status NOT NULL,
+  CONSTRAINT paidcalls_pkey PRIMARY KEY(id),
+  CONSTRAINT paidcalls_fk_client FOREIGN KEY (client_id)
+    REFERENCES public.client(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE,
+  CONSTRAINT paidcalls_fk_prefix FOREIGN KEY (prefix_id)
+    REFERENCES public.prefix(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE,
+  CONSTRAINT paidcalls_fk_tarif FOREIGN KEY (code_id)
+    REFERENCES public.tarif(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+-- описания полей можно задать в самой базе:
+
+COMMENT ON COLUMN public.paidcalls.calldate
+IS 'дата и время поступления вызова';
+
+COMMENT ON COLUMN public.paidcalls.channel
+IS 'входящий канал';
+
+COMMENT ON COLUMN public.paidcalls.dstchannel
+IS 'исходящий канал';
+
+COMMENT ON COLUMN public.paidcalls.src
+IS 'входящий номер (абонент А)';
+
+COMMENT ON COLUMN public.paidcalls.dst
+IS 'исходящий канал (абонент Б)';
+
+COMMENT ON COLUMN public.paidcalls.dcontext
+IS '"контекст" вызова в asterisk';
+
+COMMENT ON COLUMN public.paidcalls.client_id
+IS 'ключ к таблице клиентов';
+
+COMMENT ON COLUMN public.paidcalls.client
+IS 'имя клиента (продублируем для удобства)';
+
+COMMENT ON COLUMN public.paidcalls.prefix_id
+IS 'ключ к таблице префиксов';
+
+COMMENT ON COLUMN public.paidcalls.code_id
+IS 'ключ к таблице тел.кодов';
+
+COMMENT ON COLUMN public.paidcalls.number
+IS 'выделенный номер абонента Б';
+
+COMMENT ON COLUMN public.paidcalls.duration
+IS 'длительность вызова в секундах';
+
+COMMENT ON COLUMN public.paidcalls.billsec
+IS 'длительность вызова после ответа аб.Б в секундах';
+
+COMMENT ON COLUMN public.paidcalls.billmin
+IS 'тарифицируемая длительность вызова в минутах';
+
+COMMENT ON COLUMN public.paidcalls.price
+IS 'стоимость минуты';
+
+COMMENT ON COLUMN public.paidcalls.total
+IS 'общая стоимость вызова';
+
+COMMENT ON COLUMN public.paidcalls.provider_id
+IS 'ключ к таблице провайдеров';
+
+COMMENT ON COLUMN public.paidcalls.status
+IS 'стадия обработки тарификации вызова';
+
+ALTER TABLE public.paidcalls
+  OWNER TO billadmin;
+
+----------------------------------------------------------------------------
+-- перчисляемый тип, нужен для отслеживания статуса обработки данных вызова
+
+CREATE TYPE public.enum_paidcalls_status AS ENUM (
+    'new record', 'client defined', 'destination defined', 'tarif defined'
+);
+---------------------------------------------------------------------------------------------
+-- таблица абонентов: по ней определяется тариф (у каждого абонента может же быть свой тариф)
+
+CREATE TABLE public.client (
+  id SERIAL,
+  name VARCHAR(1) DEFAULT 'noname'::character varying NOT NULL,
+  tarif_id SMALLINT DEFAULT 0 NOT NULL,
+  CONSTRAINT client_pkey PRIMARY KEY(id)
+) ;
+
+COMMENT ON COLUMN public.client.name
+IS 'название клиента';
+
+COMMENT ON COLUMN public.client.tarif_id
+IS 'номер тарифа';
+
+ALTER TABLE public.client
+  OWNER TO billadmin;
+
+----------------------------------------------------------------------------
+-- таблица номеров абонентов: у каждого абонента может быть несколько номеров
+-- через номер в этой таблице ищем звонящего абонента 
+
+CREATE TABLE public.callerid (
+  id SERIAL,
+  client_id INTEGER DEFAULT 0 NOT NULL,
+  callerid VARCHAR(20) DEFAULT ''::character varying NOT NULL,
+  CONSTRAINT callerid_callerid_key UNIQUE(callerid),
+  CONSTRAINT callerid_pkey PRIMARY KEY(id),
+  CONSTRAINT callerid_fk_client FOREIGN KEY (client_id)
+    REFERENCES public.client(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+COMMENT ON COLUMN public.callerid.client_id
+IS 'ключ к таблице клиентов';
+
+COMMENT ON COLUMN public.callerid.callerid
+IS 'CallerID клиента';
+
+----------------------------------------------------------------------------
+-- таблица префиксов: по ней определяем тип вызова
+
+CREATE TABLE public.prefix (
+  id SERIAL,
+  prefix VARCHAR(20) DEFAULT ''::character varying NOT NULL,
+  description VARCHAR(1),
+  CONSTRAINT prefix_pkey PRIMARY KEY(id),
+  CONSTRAINT prefix_prefix_key UNIQUE(prefix)
+) ;
+
+COMMENT ON COLUMN public.prefix.prefix
+IS 'префикс';
+
+COMMENT ON COLUMN public.prefix.description
+IS 'описание префикса';
+
+-------------------------------------------------------------------------------------
+-- таблица тарифов: в неё заносятся все тарифы по каждому префиксу и телефонному коду
+-- по сути весь процесс тарификации сводится к поиску нужной строки в этой таблице
+
+CREATE TABLE public.tarif (
+  id SERIAL,
+  tarifnum INTEGER DEFAULT 0 NOT NULL,
+  prefix_id INTEGER,
+  code VARCHAR(20) DEFAULT ''::character varying NOT NULL,
+  description VARCHAR(80) DEFAULT ''::character varying NOT NULL,
+  price REAL DEFAULT 0 NOT NULL,
+  CONSTRAINT tarif_pkey PRIMARY KEY(id),
+  CONSTRAINT tarif_fk_prefix FOREIGN KEY (prefix_id)
+    REFERENCES public.prefix(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+
+COMMENT ON COLUMN public.tarif.tarifnum
+IS 'номер тарифа';
+
+COMMENT ON COLUMN public.tarif.prefix_id
+IS 'префикс';
+
+COMMENT ON COLUMN public.tarif.code
+IS 'телефонный код';
+
+COMMENT ON COLUMN public.tarif.description
+IS 'населённый пункт';
+
+COMMENT ON COLUMN public.tarif.price
+IS 'цена за минуту';
+
+----------------------------------------------------------------------------
