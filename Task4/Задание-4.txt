@@ -1,0 +1,294 @@
+############################################################################################################################################
+--  Практическое задание по теме “CRUD - операции”
+############################################################################################################################################
+
+https://docs.google.com/document/d/1RTeVmGitpB63xr-E5rEqoYcLnuEdps9I_PSiI-JAfho/edit?usp=sharing
+
+Выполнить CRUD операции, аналогичные сделанным на уроке, но с типами данных array и json (и/или другими интересными для вас типами данных: uuid, сетевые адреса, xml, геоданные)
+Оф. документация на русском языке для PostgreSQL 12
+Типы данных  - глава 8, стр 125 https://postgrespro.ru/media/docs/postgresql/12/ru/postgres-A4.pdf
+
+Оф. документация на русском языке для PostgreSQL других версий
+https://postgrespro.ru/docs/postgresql
+
+############################################################################################################################################
+
+Для начала добавим в таблицу users новое поле uuid
+Это поле мы не будем использовать как первичный ключ т.к это неудобно (и работать будет медленнее),
+но он нам пригодиться если придётся обмениваться данными о пользователях с внешними системами т.к. uuid глобально уникален.
+Генерировать uuid мы будем непосредственно в БД с помощью расширения "uuid-ossp" при вставке строки в таблицу users
+
+$ sudo su - postgres
+[sudo] пароль для victor:
+postgres@GB-Ubuntu:~$ psql
+psql (12.4 (Ubuntu 12.4-0ubuntu0.20.04.1))
+Type "help" for help.
+
+postgres=# \c vkdb
+You are now connected to database "vkdb" as user "postgres".
+
+vkdb=# create extension "uuid-ossp";
+CREATE EXTENSION
+
+-- Проверяем:
+vkdb=# SELECT uuid_generate_v4();
+           uuid_generate_v4
+--------------------------------------
+ 184df29f-d5aa-492f-af30-770a2c4d703b
+(1 row)
+
+-- добавим поле в таблицу:
+vkdb=# ALTER TABLE public.users ADD COLUMN uuid UUID DEFAULT uuid_generate_v4() NOT NULL UNIQUE;
+ALTER TABLE
+
+-- Далее сгенерируем и вставим данные в таблицы users и settings с помощью питоновской программы 
+-- Код привожу для наглядности, чтобы было понятно откуда и как берутся данные:
+
+import psycopg2
+import random, string, datetime
+#---------------------------------------------------------------------------------------------------------------
+def create_connection(db_name, db_user, db_password, db_host, db_port):
+    ''' Ф-ция соединения с БД'''
+    connection = None
+    try:
+        connection = psycopg2.connect(
+            database=db_name,
+            user=db_user,
+            password=db_password,
+            host=db_host,
+            port=db_port,
+        )
+        print("Connection to PostgreSQL DB successful!!")
+    except OperationalError as e:
+        print(f"The error '{e}' occurred...")
+    return connection
+#---------------------------------------------------------------------------------------------------------------
+def random_password(min, max):
+    ''' Ф-ция генерации пароля'''
+    chars = string.ascii_uppercase + string.ascii_lowercase + string.digits
+    size = random.randint(min, max)
+    return ''.join(random.choice(chars) for x in range(size))
+def random_phone_number(dignum):
+    ''' Ф-ция генерации случайного мобильного тел.номера для РФ'''
+    digits = string.digits
+    return '+79' + ''.join(random.choice(digits) for x in range(dignum))
+def random_date(start, end):
+    ''' Ф-ция генерации случайной даты'''
+    return start + datetime.timedelta(seconds = random.randint(0, int((end - start).total_seconds())),)
+#---------------------------------------------------------------------------------------------------------------
+# Создаём соединение с БД
+connection = create_connection("vkdb", "vkadmin", "vkadminpwd", "192.168.51.120", "5432")
+connection.autocommit = True
+n = 10
+i = n
+while i < n+100:
+    # формируем данные пользователя случайным образом
+    username = 'User' + str(i)
+    email = username + '@mail.ru'
+    surname = 'Фамилия' + str(i)
+    birthday = str(random_date(datetime.date(1900, 1, 1), datetime.date(2020, 1, 28)))
+    photo_id = random.randint(100000000000000000, 999999999999999999) # мне кажется это поле лишнее - лучше использовать id или uuid, но пусть будет
+    # вставляем данные пользователя
+    userdata = [(email, username, random_password(8,16), surname, random_phone_number(9), random.choice('MF'), birthday, photo_id)]
+    with connection:
+        with connection.cursor() as cur:
+            # вставляем строку с данными пользователя
+            cur.execute(f"INSERT INTO users (email, name, pass, surname, phone, gender, birthday, photo_id) VALUES %s", userdata)
+            # смотрим его сгенерированный uuid - должна быть только одна запись!
+            cur.execute("SELECT id FROM users WHERE name = %s", [username])
+            # считываем ОДНУ запись
+            id = cur.fetchone()
+            # формируем данные для настроек пользователя
+            can_see = random.choice(['all', 'friends_of_friends', 'friends'])
+            can_comment = random.choice(['all', 'friends_of_friends', 'friends', 'nobody'])
+            can_message = random.choice(['all', 'friends_of_friends', 'friends'])
+            # вставляем данные настроек пользователя
+            cur.execute("INSERT INTO settings (user_id, can_see, can_comment, can_message)" +
+                        "VALUES (%s, %s, %s, %s)", (id[0], can_see, can_comment, can_message))
+    i += 1
+#----------------------------------------------------------------------------------------------
+
+vkdb=# SELECT * FROM users LIMIT 10;
+ id |     email      |  name  |       pass       |  surname  |    phone     | gender |  birthday  |      photo_id      |         created_at         |                 uuid
+----+----------------+--------+------------------+-----------+--------------+--------+------------+--------------------+----------------------------+--------------------------------------
+  1 | User1@mail.ru  | User1  | dQygvhu1         | Фамилия1  | +79839327816 | F      | 1917-08-23 | 919445649757000555 | 2020-09-04 12:09:08.932+03 | 85bf6e8d-b9e4-4c1d-aa49-2579251299e1
+  2 | User2@mail.ru  | User2  | MZhFKxIAI1LzykKx | Фамилия2  | +79411748954 | F      | 1935-06-11 | 454241565888733841 | 2020-09-04 12:09:08.955+03 | ebc45ec5-0a34-4bd2-a9b9-3c56ab70f6b6
+  5 | User4@mail.ru  | User4  | 7sYGnEoo1u       | Фамилия4  | +79166706827 | F      | 1975-11-15 | 351243913813719651 | 2020-09-04 12:41:02.161+03 | dbc1f715-5150-4639-bf59-6b24b3d4af9d
+  6 | User5@mail.ru  | User5  | gXBfBEpMO        | Фамилия5  | +79944549247 | M      | 2000-02-02 | 543953716344227917 | 2020-09-04 12:41:02.181+03 | 87be67c3-7837-4487-a771-162f0f92ffed
+  7 | User10@mail.ru | User10 | ccL7B4kES7       | Фамилия10 | +79453836005 | M      | 1951-03-07 | 782882518561072348 | 2020-09-04 12:43:49.245+03 | 587409f6-d79b-4566-b078-b8b5369a7090
+  8 | User11@mail.ru | User11 | s67YcZFO         | Фамилия11 | +79497567282 | F      | 1982-04-03 | 946269532291657645 | 2020-09-04 12:43:49.263+03 | 194c5d3a-a36c-41b8-b9fc-6fc0da0ae162
+  9 | User12@mail.ru | User12 | yBMvJaG0         | Фамилия12 | +79745520384 | M      | 1907-10-02 | 694833845776654107 | 2020-09-04 12:43:49.276+03 | 00defd8b-0a92-4092-8f06-52c48548bd1e
+ 10 | User13@mail.ru | User13 | VvVS7H6Goz       | Фамилия13 | +79611441954 | F      | 1906-01-03 | 288208159907578655 | 2020-09-04 12:43:49.29+03  | 750fbd82-d954-4fea-a743-afc6c5787928
+ 11 | User14@mail.ru | User14 | NLoyDs0VFCOa6    | Фамилия14 | +79851252264 | F      | 1995-09-18 | 812654225769871219 | 2020-09-04 12:43:49.304+03 | 7ac5088f-5f83-421d-975c-cc9dcd6ee876
+ 12 | User15@mail.ru | User15 | 2SzWqBncTScoq    | Фамилия15 | +79572278546 | M      | 1995-05-30 | 794141239060671131 | 2020-09-04 12:43:49.319+03 | 8416a1fa-6b55-43e9-8ed7-27dcbb841160
+(10 rows)
+
+vkdb=# SELECT * FROM settings LIMIT 10;
+ user_id |      can_see       |    can_comment     |    can_message
+---------+--------------------+--------------------+--------------------
+       1 | friends_of_friends | nobody             | friends
+       2 | friends            | friends_of_friends | all
+       5 | friends            | friends            | friends_of_friends
+       6 | friends            | nobody             | friends
+       7 | all                | friends            | all
+       8 | friends_of_friends | all                | friends
+       9 | friends_of_friends | nobody             | friends_of_friends
+      10 | all                | friends            | all
+      11 | all                | friends_of_friends | friends_of_friends
+      12 | friends            | friends            | friends_of_friends
+(10 rows)
+
+-- теперь попробуем поменять настройки:
+
+vkdb=# UPDATE settings SET can_see = 'all', can_comment = 'all', can_message = 'all' WHERE user_id = 1;
+UPDATE 1
+vkdb=# SELECT * FROM settings WHERE user_id = 1;;
+ user_id | can_see | can_comment | can_message
+---------+---------+-------------+-------------
+       1 | all     | all         | all
+(1 row)
+
+-- а теперь попробуем задать неверные значения:
+vkdb=# UPDATE settings SET can_see = 'all', can_comment = 'all', can_message = 'dfgdasg' WHERE user_id = 1;
+ERROR:  invalid input value for enum can_message_enum: "dfgdasg"
+LINE 1: ...n_see = 'all', can_comment = 'all', can_message = 'dfgdasg' ...
+
+-- Далее создадим новую таблицу ADDRESS, куда будем добавлять IP и MAC адреса пользователей:
+
+CREATE TABLE public.address (
+  id BIGSERIAL,
+  user_id BIGINT NOT NULL,
+  ip INET,
+  mac MACADDR,
+  CONSTRAINT address_pkey PRIMARY KEY(id),
+  CONSTRAINT address_user_id_key UNIQUE(user_id),
+  CONSTRAINT address_fk_user_id FOREIGN KEY (user_id)
+    REFERENCES public.users(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+    NOT DEFERRABLE
+) ;
+
+-- смотрим в каких форматах принимаются адреса:
+vkdb=# INSERT INTO address (user_id, ip, mac) VALUES (1, '192.168.51.122', '00:15:5d:33:16:0e');
+INSERT 0 1
+vkdb=# INSERT INTO address (user_id, ip, mac) VALUES (2, '192.168.51.0/24', '00155d33160d');
+INSERT 0 1
+vkdb=# INSERT INTO address (user_id, ip, mac) VALUES (3, '192.168.51.0/24', '00155d33160a');
+ERROR:  insert or update on table "address" violates foreign key constraint "address_fk_user_id"
+DETAIL:  Key (user_id)=(3) is not present in table "users".
+vkdb=# INSERT INTO address (user_id, ip, mac) VALUES (5, '0.0.0.0', '00-15-5d-33-16-0a');
+INSERT 0 1
+vkdb=# INSERT INTO address (user_id, ip) VALUES (6, '192.168.0.0/16');
+INSERT 0 1
+vkdb=# INSERT INTO address (user_id, ip) VALUES (7, '0.0.0.0/0.0.0.0');
+ERROR:  invalid input syntax for type inet: "0.0.0.0/0.0.0.0"
+LINE 1: INSERT INTO address (user_id, ip) VALUES (7, ...
+                                                   ^
+vkdb=# INSERT INTO address (user_id, ip) VALUES (8, '0.0.0.0/0');
+INSERT 0 1
+vkdb=# INSERT INTO address (user_id, ip) VALUES (9, 'fe80::215:5dff:fe33:160e');
+INSERT 0 1
+
+vkdb=# select * from address;
+ id | user_id |            ip            |        mac
+----+---------+--------------------------+-------------------
+  1 |       1 | 192.168.51.122           | 00:15:5d:33:16:0e
+  2 |       2 | 192.168.51.0/24          | 00:15:5d:33:16:0d
+  4 |       5 | 0.0.0.0                  | 00:15:5d:33:16:0a
+  5 |       6 | 192.168.0.0/16           |
+  6 |       8 | 0.0.0.0/0                |
+  7 |       9 | fe80::215:5dff:fe33:160e |
+
+
+-- Теперь посмотрим денежный тип данных: 
+
+CREATE TABLE public.transactions (
+  user_id BIGINT NOT NULL,
+  balance MONEY DEFAULT 0 NOT NULL,
+  id BIGSERIAL,
+  CONSTRAINT transactions_pkey PRIMARY KEY(id),
+  CONSTRAINT transactions_fk_user_id FOREIGN KEY (user_id)
+    REFERENCES public.users(id)
+    ON DELETE NO ACTION
+    ON UPDATE NO ACTION
+    NOT DEFERRABLE
+) ;
+ 
+vkdb=# INSERT INTO transactions (user_id, balance) VALUES (1, 5.6);
+INSERT 0 1
+vkdb=# SELECT * FROM transactions;
+ id | user_id | balance
+----+---------+---------
+  1 |       1 |  5,60 ₽
+
+-- видим что считает в рублях, т.е. региональные настройки подтянулись и русской локализации Ubuntu
+
+-- далее попробуем вставлять значения баланса для пользователя известного допустим по имени с помощью конструкции WITH AS:
+
+vkdb=# WITH i AS (
+vkdb(#   SELECT id FROM users WHERE name = 'User16')
+vkdb-# INSERT INTO transactions SELECT *, 10.6 FROM i;
+INSERT 0 1
+vkdb=# WITH i AS (
+  SELECT id FROM users WHERE name = 'User16')
+INSERT INTO transactions SELECT *, 10.6 FROM i;
+INSERT 0 1
+vkdb=# WITH i AS (
+vkdb(#   SELECT id FROM users WHERE name = 'User1')
+vkdb-# INSERT INTO transactions SELECT *, 10.6 FROM i;
+INSERT 0 1
+
+vkdb=# SELECT * FROM transactions;
+ user_id | balance | id
+---------+---------+----
+      13 | 10,60 ₽ |  1
+      13 | 10,60 ₽ |  2
+       1 | 10,60 ₽ |  3
+
+-- т.е. мы можем для одного пользователя вносить несколько строк
+
+-- теперь посмотрим как работать с типом money...
+-- операция сложения:
+
+vkdb=# SELECT balance + 5 FROM transactions;
+ERROR:  operator does not exist: money + integer
+LINE 1: SELECT balance + 5 FROM transactions;
+                       ^
+HINT:  No operator matches the given name and argument types. You might need to add explicit type casts.
+
+-- т.е. автоматически числовой тип не преобразуется в деньги - нужно это делать явно:
+
+vkdb=# SELECT balance + 3.1::money FROM transactions;
+ ?column?
+----------
+  13,70 ₽
+  13,70 ₽
+  13,70 ₽
+
+-- операция деления 
+vkdb=# SELECT balance/5::money FROM transactions;
+ ?column?
+----------
+     2.12
+     2.12
+     2.12
+
+-- операция умножения
+vkdb=# SELECT balance*5 FROM transactions;
+ ?column?
+----------
+  53,00 ₽
+  53,00 ₽
+  53,00 ₽
+
+-- общий баланс пользователя
+vkdb=# SELECT SUM(balance) FROM transactions WHERE user_id = 13;
+   sum
+---------
+ 21,20 ₽
+(1 row)
+
+-- типы данных xml и json посмотрю в следующем задании, сейчас к сожалению со временем напряжёнка...
+
+-- По курсовой работе: есть реальная задачка по реализации системы биллинга для сети корпоративных телефонных серверов

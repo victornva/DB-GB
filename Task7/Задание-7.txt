@@ -1,0 +1,191 @@
+-- Модуль переноса CDR из базы MySQL в PostgreSQL.
+
+-- Этот модуль отличается от всех остальных тем что данные обрабатываются не построчно а все сразу:
+-- делается выборка всех свежих (т.е. ранее необработанных) записей - тех у которых метка marked = 0, 
+-- а также длительность разговора ненулевая. Затем за раз этот список кортежей вставляется в базу биллинга в PostgreSQL - так получается удобнее и намного быстрее чем по одной строке.
+-- Нужно ли переносить и обрабатывать вызовы с нулевой длительностью и соответственно нулевой стоимостью - это отдельный вопрос, 
+-- т.к. для получения определённой статистики это необходимо, но в данной работе мы делаем чистый биллинг, поэтому не будем их обрабатывать и будем сразу метить как обработанные.
+-- Код модуля на Питоне прикреплён в гите, а тут приведём образец результатов работы модуля:  
+
+billdb=# select * from paidcalls limit 10;
+
+ id |        calldate        |      channel      |             dstchannel             |     src     | dst | dcontext | client_id | client | prefix_id | code_id | number | duration | billsec | billmin | price | total | provider_id |   status
+----+------------------------+-------------------+------------------------------------+-------------+-----+----------+-----------+--------+-----------+---------+--------+----------+---------+---------+-------+-------+-------------+------------
+ 88 | 2020-09-01 07:38:18+03 | SIP/480-00006150  | IAX2/RELERO-27095                  | 480         | 900 | Oct60    |           |        |           |         |        |       17 |      10 |       1 |     0 |     0 |             | new record
+ 89 | 2020-09-01 08:22:58+03 | SIP/480-00006151  | IAX2/RELERO-26531                  | 480         | 900 | Oct60    |           |        |           |         |        |       18 |       9 |       1 |     0 |     0 |             | new record
+ 90 | 2020-09-01 08:29:39+03 | IAX2/RELERO-13521 | SIP/480-00006152                   | 932         | 480 | Oct60    |           |        |           |         |        |        9 |       5 |       1 |     0 |     0 |             | new record
+ 91 | 2020-09-01 08:33:59+03 | SIP/480-00006153  | IAX2/RELERO-27393                  | 480         | 932 | Oct60    |           |        |           |         |        |      106 |     104 |       1 |     0 |     0 |             | new record
+ 92 | 2020-09-01 08:56:27+03 | IAX2/RELERO-16036 | SIP/480-00006154                   | 911         | 480 | Oct60    |           |        |           |         |        |       23 |      21 |       1 |     0 |     0 |             | new record
+ 93 | 2020-09-01 08:59:41+03 | IAX2/RELERO-899   | SIP/480-00006155                   | 928         | 480 | Oct60    |           |        |           |         |        |       21 |      19 |       1 |     0 |     0 |             | new record
+ 94 | 2020-09-01 09:05:36+03 | SIP/457-00006156  | IAX2/RELERO-25332                  | 457         | 363 | Oct60    |           |        |           |         |        |      118 |     115 |       1 |     0 |     0 |             | new record
+ 95 | 2020-09-01 09:25:36+03 | IAX2/RELERO-15264 | SIP/469-00006157                   | 84242515555 | 469 | IVR-new  |           |        |           |         |        |       20 |      20 |       1 |     0 |     0 |             | new record
+ 96 | 2020-09-01 09:25:57+03 | IAX2/RELERO-15264 | Local/89163933502@Oct60-0000075d;1 | 84242515555 | 469 | IVR-new  |           |        |           |         |        |        6 |       6 |       1 |     0 |     0 |             | new record
+ 97 | 2020-09-01 09:26:03+03 | IAX2/RELERO-15264 | IAX2/RELERO-18022                  | 84242515555 | 469 | IVR-new  |           |        |           |         |        |     1424 |    1424 |       1 |     0 |     0 |             | new record
+(10 rows)
+
+
+-- Далее займёмся модулем который по номеру звонящего абонента будет вычислять кто звонил и соответственно определять его тарифный план.
+-- Перед этим проверим правильно ли работает наша структура таблиц:
+
+CREATE TABLE public.client (
+  id SERIAL,
+  name VARCHAR(80) DEFAULT 'noname'::character varying NOT NULL,
+  tarifnum INTEGER DEFAULT 0 NOT NULL,
+  CONSTRAINT client_pkey PRIMARY KEY(id)
+) ;
+
+billdb=# select * from client;
+ id | name | tarifnum
+----+------+----------
+  1 | вася |        1
+  2 | петя |        2
+  3 | ира  |        5
+(3 rows)
+
+CREATE TABLE public.callerid (
+  id SERIAL,
+  client_id INTEGER DEFAULT 0 NOT NULL,
+  callerid VARCHAR(20) DEFAULT ''::character varying NOT NULL,
+  CONSTRAINT callerid_callerid_key UNIQUE(callerid),
+  CONSTRAINT callerid_pkey PRIMARY KEY(id),
+  CONSTRAINT callerid_fk_client FOREIGN KEY (client_id)
+    REFERENCES public.client(id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+    NOT DEFERRABLE
+) ;
+
+-- тут полезно сделать FOREIGN KEY c каскадным удалением и обновлением - проверим что всё это работает как нам надо:
+
+billdb=# select * from callerid;
+ id | client_id | callerid
+----+-----------+----------
+  1 |         1 | 12345
+  2 |         2 | 49649646
+  3 |         3 | 333
+  5 |         1 | 25454
+  6 |         3 | 344324
+  4 |         2 | 2412234
+
+
+billdb=# SELECT client.name, callerid.callerid FROM client INNER JOIN callerid ON client.id = callerid.client_id ORDER BY client.name;
+ name | callerid
+------+----------
+ вася | 12345
+ вася | 25454
+ ира  | 333
+ ира  | 344324
+ петя | 49649646
+ петя | 2412234
+
+billdb=# DELETE FROM client WHERE client.id = 2;
+
+billdb=# SELECT client.name, callerid.callerid FROM client INNER JOIN callerid ON client.id = callerid.client_id ORDER BY client.name;
+ name | callerid
+------+----------
+ вася | 12345
+ вася | 25454
+ ира  | 333
+ ира  | 344324
+
+billdb=# select * from callerid;
+ id | client_id | callerid
+----+-----------+----------
+  1 |         1 | 12345
+  3 |         3 | 333
+  5 |         1 | 25454
+  6 |         3 | 344324
+
+billdb=# select * from client;
+ id | name | tarifnum
+----+------+----------
+  1 | вася |        1
+  3 | ира  |        5
+
+-- т.е. при удалении клиента автоматом удалились и его номера - то что нужно.
+
+-- теперь наоборот - при удалении номера клиента сам клиент удаляться не должен:
+
+billdb=# DELETE FROM callerid WHERE callerid.callerid = '12345';
+DELETE 1
+billdb=# select * from client;
+ id | name | tarifnum
+----+------+----------
+  1 | вася |        1
+  3 | ира  |        5
+
+billdb=# select * from callerid;
+ id | client_id | callerid
+----+-----------+----------
+  3 |         3 | 333
+  5 |         1 | 25454
+  6 |         3 | 344324
+
+-- всё как надо!
+
+Проверим UPDATE:
+
+billdb=# select * from client;
+ id | name | tarifnum
+----+------+----------
+  1 | вася |        1
+  3 | ира  |        5
+  5 | петя |        3
+
+billdb=# select * from callerid;
+ id | client_id | callerid
+----+-----------+----------
+  5 |         1 | 911
+  6 |         3 | 468
+  8 |         1 | 932
+  3 |         3 | 481
+  9 |         5 | 363
+ 10 |         5 | 900
+
+billdb=# UPDATE client SET id = 11 WHERE id = 1;
+UPDATE 1
+billdb=# select * from client;
+ id | name | tarifnum
+----+------+----------
+  3 | ира  |        5
+  5 | петя |        3
+ 11 | вася |        1
+
+billdb=# select * from callerid;
+ id | client_id | callerid
+----+-----------+----------
+  6 |         3 | 468
+  3 |         3 | 481
+  9 |         5 | 363
+ 10 |         5 | 900
+  5 |        11 | 911
+  8 |        11 | 932
+
+-- т.е. при обновлении ид клиента его ид в номерах обновляются автоматом - тоже всё как надо!
+
+------------------------------------------------------------
+-- Теперь перейдём непосредственно к модулю поиска клиента.
+-- Логика такая: 
+-- 1. Открываем транзакцию. 
+-- 2. Считываем из таблицы paidcalls одну новую запись (если есть), и смотрим есть ли исходящий номер dst в таблице номеров callerid.
+--    Если есть - это вызов входящий, т.е. бесплатный, и дальнейшая тарификация не нужна. Обновляем нашу строку paidcalls данными клиента client_id и имя, метим строку 'incoming' и завершаем транзакцию.
+-- 3. Если не входящий - ищем входящий номер src в таблице номеров callerid.
+--    Если есть - это вызов исходящий, клиент определён - обновляем нашу строку paidcalls данными клиента client_id и имя, метим строку 'client defined' и завершаем транзакцию.
+-- 4. Если вообще не нашли: метим строку 'client undefined', завершаем транзакцию.
+-- Т.к. все изменения делаются в пределах одной транзакции данные защищены от параллельного редактирования автоматически, и нам не нужно специально синхронизировать работу модулей в любом колличестве.
+
+-- В результате работы модуля (код прилагается) получается:
+
+billdb=# select id, calldate, src, dst, client_id, client, status from paidcalls order by id;
+ id  |        calldate        | src |     dst     | client_id | client |      status
+-----+------------------------+-----+-------------+-----------+--------+------------------
+ 128 | 2020-09-01 12:33:15+03 | 486 | 100         |           |        | client undefined
+ 129 | 2020-09-01 12:38:47+03 | 100 | 486         |           |        | client undefined
+ 130 | 2020-09-01 12:42:46+03 | 220 | 467         |         2 | аня    | client defined
+ 131 | 2020-09-01 12:45:11+03 | 467 | 220         |         2 | аня    | incoming
+ 132 | 2020-09-01 12:49:09+03 | 480 | 100         |         3 | ира    | client defined
+ 133 | 2020-09-01 12:49:26+03 | 486 | 100         |           |        | client undefined
+ 134 | 2020-09-01 12:53:24+03 | 486 | 100         |           |        | client undefined
+ 135 | 2020-09-01 12:54:45+03 | 945 | 480         |         3 | ира    | incoming
+ 136 | 2020-09-01 12:56:56+03 | 494 | 89645224966 |           |        | client undefined
+ 137 | 2020-09-01 12:58:02+03 | 480 | 904         |         3 | ира    | client defined
